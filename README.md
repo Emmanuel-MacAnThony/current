@@ -1,0 +1,152 @@
+# Current — Live Query Engine
+
+> Subscribe to a SQL query. Whenever the data changes, get pushed a **diff** of what changed in your result — not the whole result, not a manual event. The UI stays live without anyone wiring up notifications by hand.
+
+---
+
+## The problem
+
+Real-time UI today is hand-wired. Every place your code changes data, it also has to remember to announce it — `socket.emit('order-updated')` — so the screen updates. That couples two things that shouldn't be coupled:
+
+- the **write side** has to know what the UI is showing (which events to fire), and
+- the **UI** has to know which events map to its data.
+
+Forget to emit on one code path — or run a script/job that writes directly — and the UI **silently goes stale**. No error. The screen is just wrong, and nobody knows.
+
+## What we're building
+
+**Decouple "what changed in the data" from "who needs to know."**
+
+Instead of making every writer announce its changes, a client **subscribes to a query** — `SELECT * FROM orders WHERE status='pending'` — and the engine automatically pushes a diff (`{added, removed, modified}`) whenever anything changes that result set. The writers go back to just writing. The source of truth for "did this change?" becomes the **database itself**, observed directly.
+
+Correctness that **can't be forgotten**: the screen is right no matter *how* the data changed.
+
+*(This category is real — Materialize, ReadySet, Supabase Realtime, RethinkDB. Current is a miniature of that idea, built to understand it.)*
+
+---
+
+## What it is — a standalone, stateless service
+
+Current is **internal infrastructure**, not a product and not code embedded in your backend. It's its own service that:
+
+- **Sits next to one database** — configured at deploy time (`DATABASE_URL=… ./current`); one instance watches one DB. The browser never sees the database; that connection is a private, server-side detail.
+- **The browser talks to it directly** over WebSocket — your app's backend isn't in the live-query path at all.
+- **Replaces WebSocket spaghetti** — instead of every team hand-writing `emit` calls, a client subscribes to a SQL query and gets live diffs.
+
+### The interaction flow
+
+**Setup (once, by ops):** run the engine with the company's `DATABASE_URL` → it connects to their DB and attaches its replication slot.
+
+**Runtime (per user, in the React app):**
+1. React app opens a WebSocket to the engine (carrying an auth token).
+2. A component mounts (e.g. the orders dashboard) → sends `subscribe("SELECT … WHERE status='pending'")`.
+3. Engine runs it once → returns the **initial rows** → component renders them.
+4. DB changes → engine pushes a **diff** → component patches its rows.
+5. Component unmounts → sends `unsubscribe`.
+6. Connection drops → React **auto-reconnects** → **re-subscribes** whatever components are still mounted.
+
+### State & persistence
+
+The service **persists nothing of its own.** It holds live, in-memory, connection-scoped state (subscriptions, plans, each one's current result) **only while connected**, and throws it all away when the connection drops. On restart it comes up empty and rebuilds as clients reconnect.
+
+- **The React app is the memory** of what to watch — its mounted components *are* the subscription list, and it re-declares them on reconnect. So there's no client/subscription state to store.
+- **The only durable state** is the company's **database** (their data, not ours) and the **Postgres replication slot** (the "how far have I read the log" cursor — Postgres keeps it, not us).
+
+So the model flows *in* from the React app: it declares what to watch, we build the domain on demand (`Client → Subscription → Plan → Memory`), serve live diffs, and discard it on disconnect.
+
+---
+
+## How it works — the mental model
+
+### The components
+
+| Role | One-line job |
+|---|---|
+| **Subscription Manager** | Takes a client's "watch this query," returns the starting result. |
+| **Planner** | Compiles the query into a **Plan** (a chain of small operators in SQL's order) and notes which tables it reads. |
+| **Watcher** | Reads the database's change stream and emits each change as an event. |
+| **Matchmaker** | Routes each event to the subscriptions that read that table. |
+| **Plan** | The chain of operators. A change flows **up** through it; each operator updates its piece or re-reads if stuck; the top emits the diff. |
+| **Memory** | Holds each subscription's current result (the "before" a diff compares against). |
+| **Messenger** | Pushes the diff to the client over its open connection. |
+
+### Two phases
+
+**Subscribe (once per query):**
+```
+UI → Subscription Manager → Planner (builds the Plan + table list)
+                          → run query once → Memory → send initial result → UI
+```
+
+**React to a change (forever):**
+```
+Postgres → Watcher → Matchmaker → Plan (change flows up the operators)
+                                → Memory (update) → Messenger → UI
+```
+
+### The whole system
+
+```
+        ┌─────────────────────────── UI (browser) ───────────────────────────┐
+        │   subscribe(sql) ▲                              ▲ patch rows        │
+        └──────────┬───────┴──────────────────────────────┴──────────────────┘
+                   │ WebSocket                              ▲ WebSocket
+                   ▼                                        │
+        ┌───────────────────┐                      ┌────────────────┐
+        │  Subscription Mgr │                      │   Messenger    │
+        └─────────┬─────────┘                      └───────▲────────┘
+                  ▼                                         │
+             ┌─────────┐   initial run    ┌──────────┐     │
+             │ Planner │ ───────────────► │  Memory  │ ────┘
+             └────┬────┘                  └────▲─────┘
+                  │ Plan+tables               │ update
+                  ▼                           │
+        ══════ per-subscription ══════   ┌────┴────┐   route   ┌────────────┐
+                                         │  Plan   │ ◄──────── │ Matchmaker │
+                                         └────▲────┘           └─────▲──────┘
+                                              │ re-read              │ event
+                                         ┌────┴─────┐          ┌─────┴────┐
+                                         │ Postgres │ ───────► │ Watcher  │
+                                         └──────────┘  logical └──────────┘
+                                                       stream
+```
+
+**Straight-line summary**
+- **Subscribe (down):** `UI → Subscription Manager → Planner → Postgres → Memory → UI`
+- **Change (up):** `Postgres → Watcher → Matchmaker → Plan → Memory → Messenger → UI`
+
+---
+
+## Key design decisions (the *why*)
+
+**1. Hook the change-log, don't poll.**
+Polling (re-run queries on a timer) has designed-in lag, wastes work, and *misses history* (a row that changes twice between polls looks like it changed once). Instead we tap the database's own **write-ahead log** via **logical replication** — it already records every change, in order, durably, for its own crash-recovery and replicas. We consume the *logical* (decoded) stream: `{table, op, old row, new row}`. Zero extra cost to writes, never misses a change.
+
+**2. A change either updates the result in place, or forces a re-read.**
+The rule: a query can be maintained incrementally as long as **`new_result = f(stored_result, event)`** — the change plus what we already hold is enough to know the new answer. If it needs information in neither, we go back to the database. It's not about the query's *shape* — it's about *sufficiency of information*.
+
+**3. Compile each query into a Plan of operators — don't judge the whole query by its worst part.**
+A query is a chain of steps (`Filter → Count`, `Join → Filter → Max`, in SQL's fixed order). Each operator does its own cheap update. "Count of pending orders" stays `+1 / −1` in memory instead of re-running the DB just because it contains an aggregate. Operators are reusable pieces you snap together — so you don't need a bespoke handler for every query combination.
+
+**4. Re-eval is the catch-all fallback, and it's just another operator.**
+Anything the Planner can't decompose collapses into a single **ReEval** operator that re-runs the query and diffs against Memory (via a generic `compareByKey`). Always correct, for any query. So **correctness never depends on covering all of SQL** — unrecognized clauses safely fall through to re-eval. Fast paths are an opt-in allow-list on top.
+
+**5. Additions are cheap; a removal that leaves a gap is what sends you to the DB.**
+`count`/`sum` never re-read (they don't care *which* row left). `max`/`top-N` re-read only when the row with a *specific role* leaves and its successor was discarded — "what's behind the thing that just left?" is a question only the source can answer. That's the exact line where in-memory maintenance ends and the database begins.
+
+---
+
+## Tech stack
+
+| Component | Tool |
+|---|---|
+| Database | PostgreSQL, `wal_level=logical` + a publication + replication slot |
+| Watcher | Go + `pglogrepl` (via `pgx`) on the logical replication slot |
+| Planner | Go + SQL parser (`pg_query_go` or `vitess/sqlparser`) |
+| Matchmaker | In-memory index — Go map `table → []subscription` |
+| Plan / operators | Go (custom operators sharing one `Apply` interface) |
+| Memory | In-process Go maps (→ Redis if scaled to many nodes) |
+| Subscription Manager / Messenger | Go + WebSocket (`coder/websocket`) |
+| UI | Browser — React/JS holding a WebSocket, patches rows on each diff |
+
+**Language:** Go throughout, Postgres as the source of truth.

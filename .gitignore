@@ -1,0 +1,25 @@
+# Go binary
+/current
+*.exe
+
+# Go build cache
+/vendor/
+
+# Node
+web/node_modules/
+web/.next/
+web/.env.local
+
+# Env files
+.env
+.env.local
+*.env
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.idea/
+.vscode/
+*.swp
