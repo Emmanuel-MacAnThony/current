@@ -8,53 +8,81 @@ import (
 )
 
 // inMessage is the wire shape a client sends. It is NOT the use-case Input: the
-// handler assembles that, injecting clientID from the socket — never from here.
+// handler assembles that, injecting clientID from the socket and the query result
+// it computed — never from here.
 type inMessage struct {
 	Type string `json:"type"` // "subscribe" | "unsubscribe"
 	ID   string `json:"id"`
 	SQL  string `json:"sql"`
 }
 
-// outMessage is a frame we send back: an ack on success, or a developer-facing
+// outMessage is a frame we send back: initial data, an ack, or a developer-facing
 // error the client's console shows.
 type outMessage struct {
-	Type    string `json:"type"` // "ack" | "error"
-	ID      string `json:"id,omitempty"`
-	Message string `json:"message,omitempty"`
+	Type    string           `json:"type"` // "data" | "ack" | "error"
+	ID      string           `json:"id,omitempty"`
+	Message string           `json:"message,omitempty"`
+	Rows    domain.ResultSet `json:"rows,omitempty"`
 }
 
 // Server is the transport edge: it translates raw wire messages into manager
-// calls and sends ack/error frames back, so the manager never has to know about
-// sockets or JSON.
+// calls and sends frames back. It holds the QueryRunner so it can run a
+// subscription's query HERE, at the edge — outside the manager's lock — then hand
+// the finished result to a fast Subscribe.
 type Server struct {
-	m *manager.Manager
+	m      *manager.Manager
+	runner QueryRunner
 }
 
-func NewServer(m *manager.Manager) *Server {
-	return &Server{m: m}
+func NewServer(m *manager.Manager, runner QueryRunner) *Server {
+	return &Server{m: m, runner: runner}
 }
 
 // HandleMessage processes one inbound wire message. clientID is supplied by the
-// caller (derived from the socket), never taken from the payload — that's what
-// makes a client unable to act as anyone else.
+// caller (derived from the socket), never taken from the payload.
 func (s *Server) HandleMessage(clientID string, conn domain.Connection, data []byte) {
 	var msg inMessage
 	if err := json.Unmarshal(data, &msg); err != nil {
-		// A message we can't even parse is a developer error — tell them.
 		send(conn, outMessage{Type: "error", Message: "malformed message"})
 		return
 	}
 
 	switch msg.Type {
 	case "subscribe":
-		res := s.m.Subscribe(manager.SubscribeInput{ClientID: clientID, ID: msg.ID, SQL: msg.SQL})
-		reply(conn, msg.ID, res.Err)
+		s.handleSubscribe(clientID, conn, msg)
 	case "unsubscribe":
 		res := s.m.Unsubscribe(manager.UnsubscribeInput{ClientID: clientID, ID: msg.ID})
 		reply(conn, msg.ID, res.Err)
 	default:
 		// Unknown types are ignored — no frame.
 	}
+}
+
+// handleSubscribe runs the query at the edge (outside the manager's lock), stores
+// the result via a fast Subscribe, and sends the initial rows. Cheap input checks
+// gate the query so we never hit the DB for a malformed request.
+func (s *Server) handleSubscribe(clientID string, conn domain.Connection, msg inMessage) {
+	if msg.ID == "" {
+		send(conn, outMessage{Type: "error", ID: msg.ID, Message: manager.ErrEmptySubID.Error()})
+		return
+	}
+	if msg.SQL == "" {
+		send(conn, outMessage{Type: "error", ID: msg.ID, Message: manager.ErrEmptySQL.Error()})
+		return
+	}
+
+	rows, err := s.runner.Run(msg.SQL) // slow I/O, but no manager lock is held here
+	if err != nil {
+		send(conn, outMessage{Type: "error", ID: msg.ID, Message: "query failed: " + err.Error()})
+		return
+	}
+
+	res := s.m.Subscribe(manager.SubscribeInput{ClientID: clientID, ID: msg.ID, SQL: msg.SQL, Result: rows})
+	if res.Err != nil {
+		send(conn, outMessage{Type: "error", ID: msg.ID, Message: res.Err.Error()})
+		return
+	}
+	send(conn, outMessage{Type: "data", ID: msg.ID, Rows: rows})
 }
 
 // reply acks on success, or sends a developer-facing error frame on failure.

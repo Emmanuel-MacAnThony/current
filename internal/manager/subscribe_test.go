@@ -25,10 +25,13 @@ func setup() (*manager.Manager, *domain.Client) {
 	return m, client
 }
 
-func TestSubscribe_ValidInput_RegistersSubscription(t *testing.T) {
+func TestSubscribe_ValidInput_RegistersSubscriptionWithInitialResult(t *testing.T) {
 	m, client := setup()
+	rows := domain.ResultSet{{"id": 1, "amount": 1500}}
 
-	res := m.Subscribe(manager.SubscribeInput{ClientID: "c1", ID: "orders", SQL: "SELECT id FROM orders"})
+	res := m.Subscribe(manager.SubscribeInput{
+		ClientID: "c1", ID: "orders", SQL: "SELECT id FROM orders", Result: rows,
+	})
 
 	if !res.IsOk() {
 		t.Fatalf("expected ok, got error: %v", res.Err)
@@ -39,6 +42,11 @@ func TestSubscribe_ValidInput_RegistersSubscription(t *testing.T) {
 	}
 	if sub.ID != "orders" || sub.ClientID != "c1" || sub.SQL != "SELECT id FROM orders" {
 		t.Fatalf("stored subscription is wrong: %+v", sub)
+	}
+	// The initial result is stored as the subscription's Memory (the "before" for
+	// future diffs).
+	if len(sub.Result) != 1 || sub.Result[0]["id"] != 1 {
+		t.Fatalf("expected initial result stored, got %+v", sub.Result)
 	}
 	if len(client.Subs) != 1 {
 		t.Fatalf("expected 1 subscription, got %d", len(client.Subs))

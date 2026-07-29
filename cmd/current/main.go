@@ -8,24 +8,40 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
 	"github.com/Emmanuel-MacAnThony/current/internal/api"
 	"github.com/Emmanuel-MacAnThony/current/internal/manager"
+	"github.com/Emmanuel-MacAnThony/current/internal/postgres"
 	"github.com/Emmanuel-MacAnThony/current/internal/transport"
 )
 
 func main() {
-	// A context cancelled on Ctrl-C / kill. Wiring it in as the server's
-	// BaseContext means every connection's context derives from it, so cancelling
-	// it unblocks every websocket read loop — the outside control over all conns.
+	// A context cancelled on Ctrl-C / kill. As the server's BaseContext, every
+	// connection derives from it — cancelling it unblocks every read loop.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// The one database the engine watches — configured here, never by clients.
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		dsn = "postgres://ledger:ledger@localhost:5432/ledger"
+	}
+	pool, err := postgres.NewPool(ctx, dsn)
+	if err != nil {
+		log.Fatalf("current: cannot open db pool: %v", err)
+	}
+	defer pool.Close()
+	if err := pool.Ping(ctx); err != nil {
+		log.Fatalf("current: cannot reach db at %s: %v", dsn, err)
+	}
+
 	m := manager.New()
-	dispatcher := transport.NewServer(m)
+	runner := postgres.NewQueryRunner(pool)
+	dispatcher := transport.NewServer(m, runner)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", api.WSHandler(m, dispatcher))
@@ -37,17 +53,15 @@ func main() {
 	}
 
 	go func() {
-		log.Printf("current: listening on %s (websocket at /ws)", srv.Addr)
+		log.Printf("current: listening on %s (watching %s)", srv.Addr, dsn)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("current: server error: %v", err)
 		}
 	}()
 
-	<-ctx.Done() // wait for a shutdown signal
+	<-ctx.Done()
 	log.Println("current: shutting down...")
 
-	// ctx is already cancelled, so the read loops are unblocking; give the server
-	// a bounded window to drain in-flight handlers, then stop.
 	shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(shutCtx); err != nil {
