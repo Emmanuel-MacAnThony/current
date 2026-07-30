@@ -56,6 +56,28 @@ So the model flows *in* from the React app: it declares what to watch, we build 
 
 ---
 
+## Requirements — the database
+
+Current is a live view over **one existing Postgres**, configured at startup via `DATABASE_URL` (never by clients). That database has one hard requirement:
+
+> **`wal_level = logical`**
+
+Current reads the database's change stream via **logical replication** (the same mechanism Debezium and Supabase Realtime use), and that stream is only *readable* when `wal_level = logical`. At the default `replica`, Postgres doesn't write the detail an outside reader needs — there's nothing to decode.
+
+What this means for adopting it:
+- **It's a config change + a one-time restart — not a data migration.** `wal_level` is server config; your data is untouched.
+- **It's standard for this whole category.** Every CDC / live-query tool requires it, and many production databases already run it.
+
+Current **fails fast**: at startup it runs `SHOW wal_level` and refuses to start (with a clear message) if it isn't `logical`. It can *validate* the setting but can't enable it for you.
+
+**Enabling it:**
+- **Docker Postgres:** add `command: ["postgres", "-c", "wal_level=logical"]` to the service and restart the container — a named volume keeps your data.
+- **Managed (RDS / Cloud SQL):** set the logical-replication parameter and reboot once.
+
+*(Full **old**-row values on updates/deletes additionally need `REPLICA IDENTITY FULL` on the watched tables — this matters for diffing, and is noted where it comes up.)*
+
+---
+
 ## How it works — the mental model
 
 ### The components
