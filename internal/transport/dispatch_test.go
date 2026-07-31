@@ -66,8 +66,8 @@ func TestDispatch_ValidSubscribe_RunsQueryStoresResultSendsData(t *testing.T) {
 		t.Fatalf("expected the query to run with the sql; called=%v sql=%q", runner.called, runner.gotSQL)
 	}
 	sub, ok := client.Subs["orders"]
-	if !ok || len(sub.Result) != 1 {
-		t.Fatalf("expected sub registered with the initial result, got %+v", sub)
+	if !ok || len(sub.Result) != 1 || sub.Key != "id" {
+		t.Fatalf("expected sub registered with the initial result and default key 'id', got %+v", sub)
 	}
 	if len(conn.sent) != 1 {
 		t.Fatalf("expected 1 frame, got %d", len(conn.sent))
@@ -75,6 +75,18 @@ func TestDispatch_ValidSubscribe_RunsQueryStoresResultSendsData(t *testing.T) {
 	f := decode(t, conn.sent[0])
 	if f.Type != "data" || f.ID != "orders" || len(f.Rows) != 1 {
 		t.Fatalf("expected a data frame with 1 row, got %+v", f)
+	}
+}
+
+func TestDispatch_Subscribe_KeyOverride(t *testing.T) {
+	s, client, conn, runner := setup()
+	runner.rows = domain.ResultSet{{"pk": 7}}
+
+	s.HandleMessage("c1", conn, []byte(`{"type":"subscribe","id":"orders","sql":"SELECT pk FROM t","key":"pk"}`))
+
+	sub, ok := client.Subs["orders"]
+	if !ok || sub.Key != "pk" {
+		t.Fatalf("expected the client-declared key 'pk', got %+v", sub)
 	}
 }
 

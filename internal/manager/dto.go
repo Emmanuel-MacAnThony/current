@@ -12,6 +12,7 @@ type SubscribeInput struct {
 	ClientID string
 	ID       string           // subID, client-chosen
 	SQL      string
+	Key      string           // column that identifies a result row, for diffing (default "id")
 	Result   domain.ResultSet // initial rows, computed by the caller before this call
 }
 

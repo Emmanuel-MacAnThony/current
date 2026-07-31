@@ -5,6 +5,7 @@ type Subscription struct {
 	ID       string    // client-chosen, so unsubscribe and diffs target one exact view
 	ClientID string    // owner — so a diff for this sub knows whose conn to push down
 	SQL      string    // the recipe: re-run on change + tells the planner which tables it reads
+	Key      string    // column that identifies a row, so the diff can match old↔new (default "id")
 	Result   ResultSet // Memory: the rows shown now — the "before" to diff against
 }
 

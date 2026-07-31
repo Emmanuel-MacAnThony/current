@@ -14,6 +14,7 @@ type inMessage struct {
 	Type string `json:"type"` // "subscribe" | "unsubscribe"
 	ID   string `json:"id"`
 	SQL  string `json:"sql"`
+	Key  string `json:"key"` // column that identifies a row, for diffing; defaults to "id"
 }
 
 // outMessage is a frame we send back: initial data, an ack, or a developer-facing
@@ -77,7 +78,12 @@ func (s *Server) handleSubscribe(clientID string, conn domain.Connection, msg in
 		return
 	}
 
-	res := s.m.Subscribe(manager.SubscribeInput{ClientID: clientID, ID: msg.ID, SQL: msg.SQL, Result: rows})
+	key := msg.Key
+	if key == "" {
+		key = "id" // the common case: rows are identified by their id column
+	}
+
+	res := s.m.Subscribe(manager.SubscribeInput{ClientID: clientID, ID: msg.ID, SQL: msg.SQL, Key: key, Result: rows})
 	if res.Err != nil {
 		send(conn, outMessage{Type: "error", ID: msg.ID, Message: res.Err.Error()})
 		return

@@ -96,6 +96,7 @@ func (m *Manager) Subscribe(in SubscribeInput) result.Result[SubscribeOutput] {
 		ID:       in.ID,
 		ClientID: in.ClientID,
 		SQL:      in.SQL,
+		Key:      in.Key,
 		Result:   in.Result, // initial rows (computed at the edge) become this sub's Memory
 	}
 	return result.Ok(SubscribeOutput{})
