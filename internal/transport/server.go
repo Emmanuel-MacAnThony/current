@@ -17,13 +17,17 @@ type inMessage struct {
 	Key  string `json:"key"` // column that identifies a row, for diffing; defaults to "id"
 }
 
-// outMessage is a frame we send back: initial data, an ack, or a developer-facing
-// error the client's console shows.
+// outMessage is a frame we send back: initial data, an ack, a developer-facing
+// error the client's console shows, or a live diff. A "data" frame carries the
+// full Rows (the initial snapshot); a "diff" frame carries only what changed.
 type outMessage struct {
-	Type    string           `json:"type"` // "data" | "ack" | "error"
-	ID      string           `json:"id,omitempty"`
-	Message string           `json:"message,omitempty"`
-	Rows    domain.ResultSet `json:"rows,omitempty"`
+	Type     string           `json:"type"` // "data" | "ack" | "error" | "diff"
+	ID       string           `json:"id,omitempty"`
+	Message  string           `json:"message,omitempty"`
+	Rows     domain.ResultSet `json:"rows,omitempty"`
+	Added    []domain.Row     `json:"added,omitempty"`
+	Removed  []domain.Row     `json:"removed,omitempty"`
+	Modified []domain.Row     `json:"modified,omitempty"`
 }
 
 // Server is the transport edge: it translates raw wire messages into manager

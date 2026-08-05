@@ -1,3 +1,66 @@
 package engine
 
-// Orchestrator: watcher -> matchmaker -> registry/plan -> transport.
+import (
+	"context"
+
+	"github.com/Emmanuel-MacAnThony/current/internal/domain"
+	"github.com/Emmanuel-MacAnThony/current/internal/manager"
+)
+
+// QueryRunner re-runs a subscription's SQL to get its fresh result set. The
+// engine owns this port (consumer-defined) so the Postgres adapter can satisfy
+// it structurally without the engine importing infra.
+type QueryRunner interface {
+	Run(sql string) (domain.ResultSet, error)
+}
+
+// Pusher delivers a computed diff to a single subscriber. Owned here for the
+// same reason: the transport adapter satisfies it structurally.
+type Pusher interface {
+	Push(conn domain.Connection, subID string, delta domain.Delta)
+}
+
+// Engine is the change-flow orchestrator. It sits between the change source
+// (the WAL watcher) and the subscribers: on every change it re-evaluates the
+// live queries, diffs each result against what the client last saw, and pushes
+// the difference.
+type Engine struct {
+	source ChangeSource
+	subs   *manager.Manager
+	runner QueryRunner
+	pusher Pusher
+}
+
+func New(source ChangeSource, subs *manager.Manager, runner QueryRunner, pusher Pusher) *Engine {
+	return &Engine{source: source, subs: subs, runner: runner, pusher: pusher}
+}
+
+// Run wires onChange as the watcher's callback and blocks until the source
+// stops (context cancelled or stream error). onChange is the seam: the watcher
+// produces changes, the engine consumes them.
+func (e *Engine) Run(ctx context.Context) error {
+	return e.source.Run(ctx, e.onChange)
+}
+
+// onChange is invoked once per database change. This is the dumb re-eval path:
+// any change re-evaluates *every* subscription (the matchmaker that would route
+// a change only to the subs whose tables it touched is deferred).
+//
+// The expensive query runs *outside* the manager's lock. Snapshot and
+// ApplyResult are the two fast lock ops that bracket it: Snapshot reads the
+// subs, we re-run each query in the open, then ApplyResult atomically diffs the
+// fresh result against stored memory and swaps it in.
+func (e *Engine) onChange(_ domain.ChangeEvent) {
+	for _, ref := range e.subs.Snapshot() {
+		newResult, err := e.runner.Run(ref.SQL)
+		if err != nil {
+			// A single query failing shouldn't sink the whole flow; skip this
+			// sub and let the next change retry it. TODO: surface via a logger.
+			continue
+		}
+		delta, conn, ok := e.subs.ApplyResult(ref.ClientID, ref.SubID, newResult)
+		if ok && !delta.IsEmpty() {
+			e.pusher.Push(conn, ref.SubID, delta)
+		}
+	}
+}

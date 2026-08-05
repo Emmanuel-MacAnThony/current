@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Emmanuel-MacAnThony/current/internal/api"
+	"github.com/Emmanuel-MacAnThony/current/internal/engine"
 	"github.com/Emmanuel-MacAnThony/current/internal/manager"
 	"github.com/Emmanuel-MacAnThony/current/internal/postgres"
 	"github.com/Emmanuel-MacAnThony/current/internal/transport"
@@ -43,6 +44,13 @@ func main() {
 	runner := postgres.NewQueryRunner(pool)
 	dispatcher := transport.NewServer(m, runner)
 
+	// The change-flow: the watcher tails the WAL and feeds every change to the
+	// engine, which re-evaluates the live queries and pushes diffs. The watcher
+	// uses its own replication connection (not the query pool), so it's a separate
+	// piece from the runner even though both point at the same database.
+	watcher := postgres.NewWatcher(dsn)
+	eng := engine.New(watcher, m, runner, transport.Messenger{})
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", api.WSHandler(m, dispatcher))
 
@@ -56,6 +64,16 @@ func main() {
 		log.Printf("current: listening on %s (watching %s)", srv.Addr, dsn)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("current: server error: %v", err)
+		}
+	}()
+
+	// The engine runs for the life of the process, tailing the WAL. A return with
+	// ctx still live means the replication stream broke (or the WAL isn't
+	// logical) — fail fast and loud rather than sit there silently pushing
+	// nothing. A return after ctx is cancelled is just the ordered shutdown.
+	go func() {
+		if err := eng.Run(ctx); err != nil && ctx.Err() == nil {
+			log.Fatalf("current: change stream stopped: %v", err)
 		}
 	}()
 
