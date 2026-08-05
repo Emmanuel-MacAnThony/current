@@ -7,6 +7,7 @@ type Subscription struct {
 	SQL      string    // the recipe: re-run on change + tells the planner which tables it reads
 	Key      string    // column that identifies a row, so the diff can match old↔new (default "id")
 	Result   ResultSet // Memory: the rows shown now — the "before" to diff against
+	Tables   []string  // tables this query reads — kept so teardown can find every index bucket it's in
 }
 
 // Client is one connection and the subscriptions opened over it. All in-memory,

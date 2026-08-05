@@ -37,10 +37,11 @@ type outMessage struct {
 type Server struct {
 	m      *manager.Manager
 	runner QueryRunner
+	parser SQLParser
 }
 
-func NewServer(m *manager.Manager, runner QueryRunner) *Server {
-	return &Server{m: m, runner: runner}
+func NewServer(m *manager.Manager, runner QueryRunner, parser SQLParser) *Server {
+	return &Server{m: m, runner: runner, parser: parser}
 }
 
 // HandleMessage processes one inbound wire message. clientID is supplied by the
@@ -76,6 +77,15 @@ func (s *Server) handleSubscribe(clientID string, conn domain.Connection, msg in
 		return
 	}
 
+	// Parse the tables the query reads (for the matchmaker index) before touching
+	// the DB — an unparseable query is rejected here, with no round-trip. Without
+	// these, the sub would be indexed under nothing and silently never update.
+	tables, err := s.parser.Tables(msg.SQL)
+	if err != nil {
+		send(conn, outMessage{Type: "error", ID: msg.ID, Message: "invalid query: " + err.Error()})
+		return
+	}
+
 	rows, err := s.runner.Run(msg.SQL) // slow I/O, but no manager lock is held here
 	if err != nil {
 		send(conn, outMessage{Type: "error", ID: msg.ID, Message: "query failed: " + err.Error()})
@@ -87,7 +97,7 @@ func (s *Server) handleSubscribe(clientID string, conn domain.Connection, msg in
 		key = "id" // the common case: rows are identified by their id column
 	}
 
-	res := s.m.Subscribe(manager.SubscribeInput{ClientID: clientID, ID: msg.ID, SQL: msg.SQL, Key: key, Result: rows})
+	res := s.m.Subscribe(manager.SubscribeInput{ClientID: clientID, ID: msg.ID, SQL: msg.SQL, Key: key, Result: rows, Tables: tables})
 	if res.Err != nil {
 		send(conn, outMessage{Type: "error", ID: msg.ID, Message: res.Err.Error()})
 		return

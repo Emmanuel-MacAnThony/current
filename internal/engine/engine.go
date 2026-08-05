@@ -42,16 +42,15 @@ func (e *Engine) Run(ctx context.Context) error {
 	return e.source.Run(ctx, e.onChange)
 }
 
-// onChange is invoked once per database change. This is the dumb re-eval path:
-// any change re-evaluates *every* subscription (the matchmaker that would route
-// a change only to the subs whose tables it touched is deferred).
+// onChange is invoked once per database change. The matchmaker routes it: only
+// the subscriptions that read the changed table are re-evaluated, not every sub.
 //
-// The expensive query runs *outside* the manager's lock. Snapshot and
-// ApplyResult are the two fast lock ops that bracket it: Snapshot reads the
-// subs, we re-run each query in the open, then ApplyResult atomically diffs the
-// fresh result against stored memory and swaps it in.
-func (e *Engine) onChange(_ domain.ChangeEvent) {
-	for _, ref := range e.subs.Snapshot() {
+// The expensive query runs *outside* the manager's lock. SubsForTable and
+// ApplyResult are the two fast lock ops that bracket it: SubsForTable reads the
+// routed subs, we re-run each query in the open, then ApplyResult atomically
+// diffs the fresh result against stored memory and swaps it in.
+func (e *Engine) onChange(event domain.ChangeEvent) {
+	for _, ref := range e.subs.SubsForTable(event.Table) {
 		newResult, err := e.runner.Run(ref.SQL)
 		if err != nil {
 			// A single query failing shouldn't sink the whole flow; skip this

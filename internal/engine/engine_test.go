@@ -47,7 +47,7 @@ func TestEngine_Change_RerunsDiffsAndPushes(t *testing.T) {
 	m := manager.New()
 	client, _ := m.Register("c1", fakeConn{})
 	old := domain.ResultSet{{"id": 1, "status": "pending"}, {"id": 2, "status": "pending"}}
-	m.Subscribe(manager.SubscribeInput{ClientID: "c1", ID: "orders", SQL: "SELECT ...", Key: "id", Result: old})
+	m.Subscribe(manager.SubscribeInput{ClientID: "c1", ID: "orders", SQL: "SELECT ...", Key: "id", Result: old, Tables: []string{"orders"}})
 
 	// After the change, the query now returns only id 1 (id 2 shipped out of the set).
 	next := domain.ResultSet{{"id": 1, "status": "pending"}}
@@ -76,7 +76,7 @@ func TestEngine_NoChange_DoesNotPush(t *testing.T) {
 	m := manager.New()
 	m.Register("c1", fakeConn{})
 	same := domain.ResultSet{{"id": 1, "status": "pending"}}
-	m.Subscribe(manager.SubscribeInput{ClientID: "c1", ID: "orders", SQL: "SELECT ...", Key: "id", Result: same})
+	m.Subscribe(manager.SubscribeInput{ClientID: "c1", ID: "orders", SQL: "SELECT ...", Key: "id", Result: same, Tables: []string{"orders"}})
 
 	// The re-run returns exactly the current result → empty delta → nothing to push.
 	runner := &fakeRunner{rows: domain.ResultSet{{"id": 1, "status": "pending"}}}

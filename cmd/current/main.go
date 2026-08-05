@@ -16,6 +16,7 @@ import (
 	"github.com/Emmanuel-MacAnThony/current/internal/api"
 	"github.com/Emmanuel-MacAnThony/current/internal/engine"
 	"github.com/Emmanuel-MacAnThony/current/internal/manager"
+	"github.com/Emmanuel-MacAnThony/current/internal/parser"
 	"github.com/Emmanuel-MacAnThony/current/internal/postgres"
 	"github.com/Emmanuel-MacAnThony/current/internal/transport"
 )
@@ -42,7 +43,7 @@ func main() {
 
 	m := manager.New()
 	runner := postgres.NewQueryRunner(pool)
-	dispatcher := transport.NewServer(m, runner)
+	dispatcher := transport.NewServer(m, runner, parser.Parser{})
 
 	// The change-flow: the watcher tails the WAL and feeds every change to the
 	// engine, which re-evaluates the live queries and pushes diffs. The watcher

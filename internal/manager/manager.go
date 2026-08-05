@@ -12,11 +12,15 @@ import (
 // Nothing here is persisted — it rebuilds as clients reconnect.
 type Manager struct {
 	mu      sync.RWMutex
-	clients map[string]*domain.Client // clientID -> Client
+	clients map[string]*domain.Client    // clientID -> Client
+	byTable map[string]map[string]SubRef // matchmaker index: table -> set of subs reading it
 }
 
 func New() *Manager {
-	return &Manager{clients: make(map[string]*domain.Client)}
+	return &Manager{
+		clients: make(map[string]*domain.Client),
+		byTable: make(map[string]map[string]SubRef),
+	}
 }
 
 // Register records a freshly connected client (done on handshake, before any
@@ -43,6 +47,14 @@ func (m *Manager) Register(clientID string, conn domain.Connection) (*domain.Cli
 func (m *Manager) Unregister(clientID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	// The client's subs die with it — including their entries in the matchmaker
+	// index. Clear those first, or SubsForTable would hand the engine references
+	// to a client that's already gone.
+	if client, ok := m.clients[clientID]; ok {
+		for _, sub := range client.Subs {
+			m.indexRemove(clientID, sub.ID, sub.Tables)
+		}
+	}
 	delete(m.clients, clientID)
 }
 
@@ -98,7 +110,11 @@ func (m *Manager) Subscribe(in SubscribeInput) result.Result[SubscribeOutput] {
 		SQL:      in.SQL,
 		Key:      in.Key,
 		Result:   in.Result, // initial rows (computed at the edge) become this sub's Memory
+		Tables:   in.Tables, // kept so teardown can find every bucket this sub is in
 	}
+	// File the sub in the matchmaker index under each table it reads, so a change
+	// routes straight to it. Same lock, still fast in-memory work.
+	m.indexAdd(SubRef{ClientID: in.ClientID, SubID: in.ID, SQL: in.SQL}, in.Tables)
 	return result.Ok(SubscribeOutput{})
 }
 
@@ -118,10 +134,14 @@ func (m *Manager) Unsubscribe(in UnsubscribeInput) result.Result[UnsubscribeOutp
 	if !ok {
 		return result.Fail[UnsubscribeOutput](ErrClientNotFound)
 	}
-	if _, exists := client.Subs[in.ID]; !exists {
+	sub, exists := client.Subs[in.ID]
+	if !exists {
 		return result.Fail[UnsubscribeOutput](ErrSubNotFound)
 	}
 
+	// Pull it out of the index (every bucket it was filed under) before dropping
+	// the sub itself, so the matchmaker never routes to a gone subscription.
+	m.indexRemove(in.ClientID, in.ID, sub.Tables)
 	delete(client.Subs, in.ID)
 	return result.Ok(UnsubscribeOutput{})
 }

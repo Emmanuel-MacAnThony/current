@@ -10,10 +10,11 @@ import "github.com/Emmanuel-MacAnThony/current/internal/domain"
 // manager's lock, never inside it).
 type SubscribeInput struct {
 	ClientID string
-	ID       string           // subID, client-chosen
+	ID       string // subID, client-chosen
 	SQL      string
 	Key      string           // column that identifies a result row, for diffing (default "id")
 	Result   domain.ResultSet // initial rows, computed by the caller before this call
+	Tables   []string         // tables the query reads, parsed at the edge — the matchmaker index keys
 }
 
 // SubscribeOutput is empty for now: success is simply "no error." It grows to
