@@ -4,6 +4,51 @@
 
 ---
 
+## Demo
+
+A page subscribes to `SELECT id, status, amount, currency FROM payments ORDER BY id` over one WebSocket. The engine runs it once and sends the initial rows; from then on it watches Postgres's change log and pushes only what changed.
+
+<p align="center">
+  <img src="web/screenshots/01-dashboard.png" alt="Current dashboard — the live result of a subscribed SQL query, connected over WebSocket" width="100%"/>
+</p>
+
+Then a row is changed **directly in the database** — `UPDATE payments SET status='failed' …`, no application code, no emitted event. The engine sees it on the WAL, re-evaluates the query, diffs it against what the client last saw, and pushes just that one modified row. The client patches its table and the row flashes; the push shows up in the log as `diff pushed — ~1`:
+
+<p align="center">
+  <img src="web/screenshots/02-live-diff.png" alt="A row changed in Postgres is pushed to the client as a diff and flashes in the table" width="100%"/>
+</p>
+
+Nothing polled, nothing hand-wired — the database was the source of truth for "did this change?", exactly as intended.
+
+> The demo UI lives in [`web/`](web/) (Next.js). The change-flow that powers it — watch → re-evaluate → diff → push — is built and verified against Postgres logical replication; the routing/incremental optimizations described below are the next steps.
+
+**Run it yourself** — the whole demo (seeded Postgres + engine + UI) is one command:
+
+```bash
+docker compose up --build      # then open http://localhost:3002
+```
+
+Then change a row in the bundled database and watch it appear on the page:
+
+```bash
+docker compose exec db psql -U current -d current \
+  -c "update payments set status='failed' where id='pay_001'"
+```
+
+<details>
+<summary>Run the pieces directly (no Docker), against any <code>wal_level=logical</code> Postgres</summary>
+
+```bash
+# the engine — watches the DB, serves the WebSocket on :8080
+DATABASE_URL="postgres://user:pass@localhost:5432/db" go run ./cmd/current
+
+# the demo UI — http://localhost:3002
+cd web && npm install && npm run dev
+```
+</details>
+
+---
+
 ## The problem
 
 Real-time UI today is hand-wired. Every place your code changes data, it also has to remember to announce it — `socket.emit('order-updated')` — so the screen updates. That couples two things that shouldn't be coupled:

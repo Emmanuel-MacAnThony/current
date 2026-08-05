@@ -21,7 +21,11 @@ import (
 // deferred Close + Unregister tear everything down.
 func WSHandler(m *manager.Manager, d *transport.Server) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		c, err := websocket.Accept(w, r, nil)
+		// Allow any origin: the client is a browser app that will usually live on a
+		// different host/port than this server (dashboard on :3002, engine on :8080),
+		// so the default same-origin handshake check would reject it. Auth is a
+		// separate, still-deferred concern — not something the origin check provides.
+		c, err := websocket.Accept(w, r, &websocket.AcceptOptions{OriginPatterns: []string{"*"}})
 		if err != nil {
 			return
 		}

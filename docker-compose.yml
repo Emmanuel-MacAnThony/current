@@ -1,0 +1,52 @@
+# Self-contained demo: a seeded Postgres, the Current engine, and the web UI.
+#   docker compose up --build   → open http://localhost:3002
+#
+# The DB here is a stand-in for "the one existing database Current watches";
+# Current itself persists nothing (see README).
+
+services:
+  db:
+    image: postgres:16
+    # Logical replication is Current's one hard DB requirement — without it there
+    # is no decodable change stream to watch.
+    command: ["postgres", "-c", "wal_level=logical"]
+    environment:
+      POSTGRES_USER: current
+      POSTGRES_PASSWORD: current
+      POSTGRES_DB: current
+    ports:
+      - "5433:5432" # host 5433 to avoid clashing with the ledger DB on 5432
+    volumes:
+      - current_pgdata:/var/lib/postgresql/data
+      - ./deploy/init:/docker-entrypoint-initdb.d:ro # seed runs once on first init
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U current -d current"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      # sslmode=disable: distroless has no CA bundle and this is a private network.
+      DATABASE_URL: postgres://current:current@db:5432/current?sslmode=disable
+    ports:
+      - "8080:8080"
+    depends_on:
+      db:
+        condition: service_healthy # wait until the seed has applied and Postgres is ready
+    restart: on-failure
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    ports:
+      - "3002:3002"
+    depends_on:
+      - server
+
+volumes:
+  current_pgdata:

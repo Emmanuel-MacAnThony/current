@@ -1,0 +1,7 @@
+# Keep the Go build context small — none of this is needed to compile the server.
+web/node_modules
+web/.next
+web/screenshots
+**/node_modules
+.git
+.DS_Store
