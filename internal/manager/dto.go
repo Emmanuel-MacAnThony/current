@@ -14,7 +14,8 @@ type SubscribeInput struct {
 	SQL      string
 	Key      string           // column that identifies a result row, for diffing (default "id")
 	Result   domain.ResultSet // initial rows, computed by the caller before this call
-	Tables   []string         // tables the query reads, parsed at the edge — the matchmaker index keys
+	Tables   []string         // tables the query reads, parsed by the handler — the matchmaker index keys
+	Operator domain.Operator  // how this sub reacts to a change (Filter / ReEval), chosen by the handler
 }
 
 // SubscribeOutput is empty for now: success is simply "no error." It grows to

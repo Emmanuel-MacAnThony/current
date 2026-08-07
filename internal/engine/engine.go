@@ -51,14 +51,28 @@ func (e *Engine) Run(ctx context.Context) error {
 // diffs the fresh result against stored memory and swaps it in.
 func (e *Engine) onChange(event domain.ChangeEvent) {
 	for _, ref := range e.subs.SubsForTable(event.Table) {
-		newResult, err := e.runner.Run(ref.SQL)
-		if err != nil {
-			// A single query failing shouldn't sink the whole flow; skip this
-			// sub and let the next change retry it. TODO: surface via a logger.
-			continue
+		// First ask the sub's operator (under the manager lock). A Filter computes
+		// the delta in memory and we're done; a ReEval defers and we fall through
+		// to the slow re-run.
+		delta, conn, needReeval, ok := e.subs.ApplyEvent(ref.ClientID, ref.SubID, event)
+		if !ok {
+			continue // sub vanished mid-flight
 		}
-		delta, conn, ok := e.subs.ApplyResult(ref.ClientID, ref.SubID, newResult)
-		if ok && !delta.IsEmpty() {
+
+		if needReeval {
+			newResult, err := e.runner.Run(ref.SQL) // slow I/O, no lock held here
+			if err != nil {
+				// A single failed re-eval shouldn't sink the flow; the next change
+				// retries it. TODO: surface via a logger.
+				continue
+			}
+			delta, conn, ok = e.subs.ApplyResult(ref.ClientID, ref.SubID, newResult)
+			if !ok {
+				continue
+			}
+		}
+
+		if !delta.IsEmpty() {
 			e.pusher.Push(conn, ref.SubID, delta)
 		}
 	}

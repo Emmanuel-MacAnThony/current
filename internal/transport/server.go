@@ -35,13 +35,13 @@ type outMessage struct {
 // subscription's query HERE, at the edge — outside the manager's lock — then hand
 // the finished result to a fast Subscribe.
 type Server struct {
-	m      *manager.Manager
-	runner QueryRunner
-	parser SQLParser
+	m       *manager.Manager
+	runner  QueryRunner
+	planner Planner
 }
 
-func NewServer(m *manager.Manager, runner QueryRunner, parser SQLParser) *Server {
-	return &Server{m: m, runner: runner, parser: parser}
+func NewServer(m *manager.Manager, runner QueryRunner, planner Planner) *Server {
+	return &Server{m: m, runner: runner, planner: planner}
 }
 
 // HandleMessage processes one inbound wire message. clientID is supplied by the
@@ -77,10 +77,15 @@ func (s *Server) handleSubscribe(clientID string, conn domain.Connection, msg in
 		return
 	}
 
-	// Parse the tables the query reads (for the matchmaker index) before touching
-	// the DB — an unparseable query is rejected here, with no round-trip. Without
-	// these, the sub would be indexed under nothing and silently never update.
-	tables, err := s.parser.Tables(msg.SQL)
+	key := msg.Key
+	if key == "" {
+		key = "id" // the common case: rows are identified by their id column
+	}
+
+	// Plan the query before touching the DB: it yields the operator (Filter or
+	// ReEval) and the tables the query reads (for the matchmaker index). An
+	// unparseable query is rejected here, with no round-trip.
+	op, tables, err := s.planner.Plan(msg.SQL, key)
 	if err != nil {
 		send(conn, outMessage{Type: "error", ID: msg.ID, Message: "invalid query: " + err.Error()})
 		return
@@ -92,12 +97,7 @@ func (s *Server) handleSubscribe(clientID string, conn domain.Connection, msg in
 		return
 	}
 
-	key := msg.Key
-	if key == "" {
-		key = "id" // the common case: rows are identified by their id column
-	}
-
-	res := s.m.Subscribe(manager.SubscribeInput{ClientID: clientID, ID: msg.ID, SQL: msg.SQL, Key: key, Result: rows, Tables: tables})
+	res := s.m.Subscribe(manager.SubscribeInput{ClientID: clientID, ID: msg.ID, SQL: msg.SQL, Key: key, Result: rows, Tables: tables, Operator: op})
 	if res.Err != nil {
 		send(conn, outMessage{Type: "error", ID: msg.ID, Message: res.Err.Error()})
 		return

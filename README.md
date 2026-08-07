@@ -20,7 +20,7 @@ Then a row is changed **directly in the database** — `UPDATE payments SET stat
 
 Nothing polled, nothing hand-wired — the database was the source of truth for "did this change?", exactly as intended.
 
-> The demo UI lives in [`web/`](web/) (Next.js). The change-flow that powers it — watch → re-evaluate → diff → push — is built and verified against Postgres logical replication; the routing/incremental optimizations described below are the next steps.
+> The demo UI lives in [`web/`](web/) (Next.js). The full change-flow is built and verified against Postgres logical replication: the **matchmaker** routes each change only to the subscriptions that read the changed table, and a simple `SELECT *` filter is maintained **incrementally in memory** — no DB round-trip; everything else falls back to a correct **re-eval**. (Deferred: incremental aggregate/`max` operators, and projected-column filters — see Status below.)
 
 **Run it yourself** — the whole demo (seeded Postgres + engine + UI) is one command:
 
@@ -203,13 +203,34 @@ Anything the Planner can't decompose collapses into a single **ReEval** operator
 
 ---
 
+## Status — what's built
+
+| Piece | State |
+|---|---|
+| Watcher (logical replication → change events) | ✅ built |
+| Subscription manager (register / subscribe / unsubscribe, connection lifecycle) | ✅ built |
+| Query-run on subscribe + initial rows | ✅ built |
+| Diff by key + push over WebSocket | ✅ built |
+| Engine change-flow (re-evaluate → diff → push) | ✅ built |
+| **Matchmaker** (route a change only to subs that read the table) | ✅ built |
+| **Filter operator** (maintain a `SELECT *` filter in memory, no DB) | ✅ built |
+| **ReEval operator** (correct fallback for everything else) | ✅ built |
+| Demo UI (Next.js) + self-contained `docker compose` | ✅ built |
+| `count` / `sum` / `max` / `top-N` operators | ⬜ deferred |
+| Projected-column filters (`SELECT a, b …`) | ⬜ deferred (fall back to re-eval today) |
+| Snapshot↔stream boundary, reconnect/resume, auth | ⬜ deferred |
+
+The **operator interface** is the extension point: each new operator (count, max, …) is a new `Apply` implementation the planner can select; anything unhandled stays correct via ReEval.
+
+---
+
 ## Tech stack
 
 | Component | Tool |
 |---|---|
 | Database | PostgreSQL, `wal_level=logical` + a publication + replication slot |
 | Watcher | Go + `pglogrepl` (via `pgx`) on the logical replication slot |
-| Planner | Go + SQL parser (`pg_query_go` or `vitess/sqlparser`) |
+| Planner | Go + `pg_query_go` (Postgres's own parser, via cgo — linked static against musl) |
 | Matchmaker | In-memory index — Go map `table → []subscription` |
 | Plan / operators | Go (custom operators sharing one `Apply` interface) |
 | Memory | In-process Go maps (→ Redis if scaled to many nodes) |

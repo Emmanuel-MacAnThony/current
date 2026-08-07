@@ -109,8 +109,9 @@ func (m *Manager) Subscribe(in SubscribeInput) result.Result[SubscribeOutput] {
 		ClientID: in.ClientID,
 		SQL:      in.SQL,
 		Key:      in.Key,
-		Result:   in.Result, // initial rows (computed at the edge) become this sub's Memory
-		Tables:   in.Tables, // kept so teardown can find every bucket this sub is in
+		Result:   in.Result,   // initial rows (computed at the edge) become this sub's Memory
+		Tables:   in.Tables,   // kept so teardown can find every bucket this sub is in
+		Operator: in.Operator, // the strategy onChange will call to react to a change
 	}
 	// File the sub in the matchmaker index under each table it reads, so a change
 	// routes straight to it. Same lock, still fast in-memory work.

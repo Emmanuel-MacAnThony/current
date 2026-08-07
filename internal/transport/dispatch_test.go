@@ -7,6 +7,7 @@ import (
 
 	"github.com/Emmanuel-MacAnThony/current/internal/domain"
 	"github.com/Emmanuel-MacAnThony/current/internal/manager"
+	"github.com/Emmanuel-MacAnThony/current/internal/plan"
 	"github.com/Emmanuel-MacAnThony/current/internal/transport"
 )
 
@@ -31,17 +32,18 @@ func (f *fakeRunner) Run(sql string) (domain.ResultSet, error) {
 	return f.rows, f.err
 }
 
-// fakeParser stands in for the SQL parser: canned tables or an error, and it
-// records whether it ran — so we can prove bad SQL never reaches the DB.
-type fakeParser struct {
+// fakePlanner stands in for the SQL planner: canned operator + tables or an error,
+// and it records whether it ran — so we can prove bad SQL never reaches the DB.
+type fakePlanner struct {
+	op     domain.Operator
 	tables []string
 	err    error
 	called bool
 }
 
-func (f *fakeParser) Tables(sql string) ([]string, error) {
+func (f *fakePlanner) Plan(sql, key string) (domain.Operator, []string, error) {
 	f.called = true
-	return f.tables, f.err
+	return f.op, f.tables, f.err
 }
 
 // frame is the test's view of an outbound message.
@@ -61,19 +63,20 @@ func decode(t *testing.T, b []byte) frame {
 	return f
 }
 
-func setup() (*transport.Server, *domain.Client, *captureConn, *fakeRunner, *fakeParser) {
+func setup() (*transport.Server, *domain.Client, *captureConn, *fakeRunner, *fakePlanner) {
 	m := manager.New()
 	conn := &captureConn{}
 	client, _ := m.Register("c1", conn)
 	runner := &fakeRunner{}
-	parser := &fakeParser{}
-	return transport.NewServer(m, runner, parser), client, conn, runner, parser
+	planner := &fakePlanner{}
+	return transport.NewServer(m, runner, planner), client, conn, runner, planner
 }
 
 func TestDispatch_ValidSubscribe_RunsQueryStoresResultSendsData(t *testing.T) {
-	s, client, conn, runner, parser := setup()
+	s, client, conn, runner, planner := setup()
 	runner.rows = domain.ResultSet{{"id": 1, "amount": 1500}}
-	parser.tables = []string{"orders"}
+	planner.tables = []string{"orders"}
+	planner.op = plan.ReEval{}
 
 	s.HandleMessage("c1", conn, []byte(`{"type":"subscribe","id":"orders","sql":"SELECT id FROM orders"}`))
 
@@ -84,9 +87,12 @@ func TestDispatch_ValidSubscribe_RunsQueryStoresResultSendsData(t *testing.T) {
 	if !ok || len(sub.Result) != 1 || sub.Key != "id" {
 		t.Fatalf("expected sub registered with the initial result and default key 'id', got %+v", sub)
 	}
-	// The parsed tables ride along so the manager can index the sub for routing.
+	// The planned tables and operator ride along and get stored on the sub.
 	if len(sub.Tables) != 1 || sub.Tables[0] != "orders" {
-		t.Fatalf("expected parsed tables stored on the sub, got %v", sub.Tables)
+		t.Fatalf("expected planned tables stored on the sub, got %v", sub.Tables)
+	}
+	if sub.Operator != planner.op {
+		t.Fatalf("expected the planned operator stored on the sub, got %#v", sub.Operator)
 	}
 	if len(conn.sent) != 1 {
 		t.Fatalf("expected 1 frame, got %d", len(conn.sent))
@@ -110,12 +116,12 @@ func TestDispatch_Subscribe_KeyOverride(t *testing.T) {
 }
 
 func TestDispatch_SubscribeEmptySQL_ErrorsWithoutRunningQuery(t *testing.T) {
-	s, client, conn, runner, parser := setup()
+	s, client, conn, runner, planner := setup()
 
 	s.HandleMessage("c1", conn, []byte(`{"type":"subscribe","id":"orders","sql":""}`))
 
-	if runner.called || parser.called {
-		t.Fatalf("should not parse or run a query for empty sql")
+	if runner.called || planner.called {
+		t.Fatalf("should not plan or run a query for empty sql")
 	}
 	if len(client.Subs) != 0 {
 		t.Fatalf("expected nothing registered")
@@ -126,8 +132,8 @@ func TestDispatch_SubscribeEmptySQL_ErrorsWithoutRunningQuery(t *testing.T) {
 }
 
 func TestDispatch_SubscribeUnparseableSQL_ErrorsWithoutRunningQuery(t *testing.T) {
-	s, client, conn, runner, parser := setup()
-	parser.err = errors.New(`syntax error at or near "FRO"`)
+	s, client, conn, runner, planner := setup()
+	planner.err = errors.New(`syntax error at or near "FRO"`)
 
 	s.HandleMessage("c1", conn, []byte(`{"type":"subscribe","id":"orders","sql":"SELECT * FRO orders"}`))
 
